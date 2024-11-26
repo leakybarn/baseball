@@ -96,7 +96,7 @@ team_data <- team_data %>%
 initial_model <- gam(
   whiff ~ te(altitude,azimuth) + #sun position 
     
-    s(air_density_scaled) + s(wind_speed_scaled) + roof +  #environment
+    s(air_density_scaled, wind_speed_scaled) + roof +  #environment
 
     leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
     
@@ -115,7 +115,7 @@ summary(initial_model)
 final_model <- gam(
   whiff ~ te(altitude,azimuth) + #sun position 
     
-    s(air_density_scaled) + s(wind_speed_scaled) + roof +  #environment
+    s(air_density_scaled, wind_speed_scaled) + roof +  #environment
     
     leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
     
