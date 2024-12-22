@@ -20,6 +20,7 @@ team_data$release_speed_scaled <- scale(team_data$release_speed)
 team_data$release_spin_rate_scaled <- scale(team_data$release_spin_rate)
 team_data$air_density_scaled <- scale(team_data$air_density)
 team_data$wind_speed_scaled <- scale(team_data$wind_speed)
+team_data$wind_deg_scaled <- scale(team_data$wind_deg)
 team_data$temp_scaled <- scale(team_data$temp)
 team_data$humidity_scaled <- scale(team_data$humidity)
 team_data$pressure_scaled <- scale(team_data$pressure)
@@ -54,222 +55,80 @@ team_data <- team_data %>%
   filter(
     swing == 1,
     inning < 9,
+    night_game == 1,
+    !month %in% c(3, 10),  # Simplify the month condition
+    !(game_date %in% c("2022-06-18", "2022-08-06")), # remove specific doubleheaders for Mariners
     astuff_plus_scaled >-5 & astuff_plus_scaled < 5 #This (broadly) removes anomalous pitches
   ) %>%
   mutate(
     home_batting = ifelse(batting_team == home_team, 1, 0),
     roof = ifelse(other_weather == "Roof Closed", 1, 0)
-    )
-
-
-
-
-
-
-#### ESTABLISH WEIGHTS FOR WIND SPEED AND AIR DENSITY ####
-
-#Fit multinomial log using sunlight_category
-propensity_model <- multinom(
-  sunlight_category ~ air_density_scaled + wind_speed_scaled,
-  data = team_data
-)
-
-#Propensity scores
-team_data <- team_data %>%
-  mutate(
-    propensity_scores = predict(propensity_model, type = "probs")
   )
-
-#IPW
-team_data <- team_data %>%
-  mutate(
-    reweights = 1 / propensity_scores[cbind(1:nrow(team_data), as.numeric(as.factor(sunlight_category)))]
-  ) %>%
-  mutate(
-    reweights = reweights / mean(reweights, na.rm = TRUE) 
-  )
-
 
 #### MODELS ####
 
-#Unweighted model
+#Unmatched model
 initial_model <- gam(
-  whiff ~ te(altitude,azimuth) + #sun position 
+  whiff ~ te(altitude,azimuth) +
     
-    s(air_density_scaled, wind_speed_scaled) + roof +  #environment
-
-    leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
+    te(air_density_scaled, wind_speed_scaled) +
+    te(wind_speed_scaled, wind_deg_scaled, by = sun_is_up) +
     
-    astuff_plus_scaled + pitch_class + zone_class + #pitch level
+    te(astuff_plus_scaled, wind_speed_scaled) + 
     
-    month + game_year + night_game + #time level
+    s(air_density_scaled) +
+    s(wind_speed_scaled) + 
+    s(wind_deg_scaled) +
     
-    s(batter, bs = "re") #random effects for batter
+    other_weather +
+    
+    starting_pitcher + times_faced + p_throws + stand + leverage + home_batting+
+    
+    astuff_plus_scaled + pitch_class + zone_class + strikes +
+    
+    month + game_year +
+    
+    te(batter, bs = "re")
   ,
   family = binomial,
   data = team_data  
 )
 summary(initial_model)
 
-#Weighted model
-final_model <- gam(
-  whiff ~ te(altitude,azimuth) + #sun position 
+#Matched model
+matched_data <- matchit(
+  sun_is_up ~ air_density_scaled + wind_speed_scaled + wind_deg_scaled, 
+  data = team_data, 
+  method = "nearest", 
+  distance = "logit", 
+  caliper = 0.1 
+)
+team_data_matched <- match.data(matched_data)
+love.plot(matched_data)
+
+matched_model <- gam(
+  whiff ~ te(altitude,azimuth) +
     
-    s(air_density_scaled, wind_speed_scaled) + roof +  #environment
+    te(air_density_scaled, wind_speed_scaled) +
+    te(wind_speed_scaled, wind_deg_scaled, by = sun_is_up) +
     
-    leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
+    te(astuff_plus_scaled, wind_speed_scaled) + 
     
-    astuff_plus_scaled + pitch_class + zone_class + #pitch level
+    s(air_density_scaled) +
+    s(wind_speed_scaled) + 
+    s(wind_deg_scaled) +
     
-    month + game_year + night_game + #time level
+    other_weather+
     
-    s(batter, bs = "re") #random effects for batter
+    starting_pitcher + times_faced + p_throws + stand + home_batting +
+    
+    astuff_plus_scaled + pitch_class + zone_class + strikes +
+    
+    month + game_year +
+    
+    s(batter, bs = "re")
   ,
   family = binomial,
-  weights = reweights,
-  data = team_data
+  data = team_data_matched
 )
-summary(final_model)
-
-
-#### PREDICT AND PLOT ####
-
-#Predict whiffs
-team_data <- team_data %>%
-  mutate(predicted_whiff_unweighted = predict(initial_model, newdata = team_data, type = "response"),
-         predicted_whiff_weighted = predict(final_model, newdata = team_data, type = "response"))
-
-
-#Plot predicted whiff rate by altitude
-ggplot(team_data, aes(x = altitude, y = predicted_whiff_weighted, color = predicted_whiff_weighted)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE, color = "#E20074", span = .5) + #This chart is brought to you by T-Mobile--what can Magenta do for you
-  scale_color_gradientn(colors = c("#0C2C56", "#C4CED4", "#005C5C")) + 
-  labs(
-    title = "Estimated whiff rate by altitude",
-    subtitle = "T-Mobile Park (2021-2023)",
-    x = "Altitude (degrees)",
-    y = "Whiff probability (%)"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  ) +
-  guides(color = "none")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#### NIGHT GAMES ####
-
-#Filter for games starting after 6 pm PDT
-team_data_night <- team_data %>%
-  filter(night_game == 1)
-
-
-#### ESTABLISH WEIGHTS FOR WIND SPEED AND AIR DENSITY ####
-
-#Fit binomial log using sun_is_up
-propensity_model <- glm(
-  sun_is_up ~ air_density_scaled + wind_speed_scaled,
-  family = binomial,
-  data = team_data_night
-)
-
-#Propensity scores
-team_data_night <- team_data_night %>%
-  mutate(propensity_scores = predict(propensity_model, type = "response"))
-
-#IPW
-team_data_night <- team_data_night %>%
-  mutate(
-    reweights = ifelse(
-      sun_is_up == 1,
-      1 / propensity_scores,        # For sun_is_up = 1
-      1 / (1 - propensity_scores)   # For sun_is_up = 0
-    )
-  ) %>%
-  mutate(reweights = reweights / mean(reweights, na.rm = TRUE))
-
-
-
-#### MODELS ####
-
-#Unweighted model
-initial_model <- gam(
-  whiff ~ te(altitude,azimuth) + #sun position 
-    
-    s(air_density_scaled) + s(wind_speed_scaled) + roof +  #environment
-    
-    leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
-    
-    astuff_plus_scaled + pitch_class + zone_class + #pitch level
-    
-    month + game_year + night_game + #time level
-    
-    s(batter, bs = "re") #random effects for batter
-  ,
-  family = binomial,
-  data = team_data_night  
-)
-summary(initial_model)
-
-#Weighted model
-final_model <- gam(
-  whiff ~ te(altitude,azimuth) + #sun position 
-    
-    s(air_density_scaled) + s(wind_speed_scaled) + roof +  #environment
-    
-    leverage_category + strikes + starting_pitcher*times_faced + p_throws*stand + home_batting + #situationals
-    
-    astuff_plus_scaled + pitch_class + zone_class + #pitch level
-    
-    month + game_year +  #time level
-    
-    s(batter, bs = "re") #random effects for batter
-  ,
-  family = binomial,
-  weights = reweights,
-  data = team_data_night
-)
-summary(final_model)
-
-
-#### PREDICT AND PLOT ####
-
-#Predict whiffs
-team_data_night <- team_data_night %>%
-  mutate(predicted_whiff_unweighted = predict(initial_model, newdata = team_data_night, type = "response"),
-         predicted_whiff_weighted = predict(final_model, newdata = team_data_night, type = "response"))
-
-
-#Plot predicted whiff rate by altitude
-ggplot(team_data_night, aes(x = altitude, y = predicted_whiff_weighted, color = predicted_whiff_weighted)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE, color = "#E20074", span = .5) +
-  scale_color_gradientn(colors = c("#0C2C56", "#C4CED4", "#005C5C")) + 
-  labs(
-    title = "Estimated whiff rate by altitude",
-    subtitle = "T-Mobile Park, night games (2021-2023)",
-    x = "Altitude (degrees)",
-    y = "Whiff Probability (%)"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  ) +
-  guides(color = "none")
+summary(matched_model)
